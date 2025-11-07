@@ -8,9 +8,15 @@ from typing import Optional
 import pandas as pd
 
 from document_io import paragraphs_to_dicts, read_document
+from llm.corrections import apply_corrections_by_windows
+from llm.chatgpt_corrector import chatgpt_corrector
 from ml.predictor import BertOpmaakprofielPredictor
 from services.title_resolver import ensure_title
 from structure.checker import check_structure
+from structure.postprocess import enforce_annex_nota_rules
+from structure.numbering import correct_numbering
+from structure.tables_images import add_tables_and_images
+from writers.doc_builder import build_word_document
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +26,12 @@ def process_document(
     *,
     export_features: bool = True,
     export_dir: Optional[Path | str] = None,
+    doc_output_dir: Optional[Path | str] = None,
     run_predictions: bool = True,
     predictor: Optional[BertOpmaakprofielPredictor] = None,
     ensure_title_step: bool = True,
     run_structure_check: bool = True,
+    run_gpt_corrections: bool = True,
 ):
     """
     Entry point for the new KOOP pipeline.
@@ -44,7 +52,9 @@ def process_document(
 
     predictions_df = None
     title_added = False
-    structure_df = None
+    structure_df_before = None
+    structure_df_final = None
+    doc_output_dir_path = Path(doc_output_dir) if doc_output_dir else Path("outputmap")
     paragraphs_df = pd.DataFrame(paragraphs_to_dicts(extraction.paragraphs))
     if run_predictions:
         predictor = predictor or BertOpmaakprofielPredictor()
@@ -66,16 +76,75 @@ def process_document(
             predictions_df, title_added = ensure_title(predictions_df, export_csv_path=str(title_csv) if title_csv else None)
             logger.info("Titel toegevoegd door AI: %s", title_added)
 
-        if run_structure_check and predictions_df is not None:
-            structure_csv = None
+        if run_structure_check:
+            initial_structure_csv = None
             if export_features:
                 export_dir_path = Path(export_dir) if export_dir else Path("resultaat/csv")
-                structure_csv = export_dir_path / f"{input_path.stem}_structure_check.csv"
-            structure_df = check_structure(
+                initial_structure_csv = export_dir_path / f"{input_path.stem}_structure_check_initial.csv"
+            structure_df_before = check_structure(
                 predictions_df,
-                export_csv_path=str(structure_csv) if structure_csv else None,
+                export_csv_path=str(initial_structure_csv) if initial_structure_csv else None,
+                reset_errors=True,
             )
-            logger.info("Structuurcheck uitgevoerd.")
+            logger.info("Structuurcheck uitgevoerd (na BERT/titel).")
+
+        if run_gpt_corrections:
+            df_for_corrections = structure_df_before if structure_df_before is not None else predictions_df
+            if df_for_corrections is not None and "fout" in df_for_corrections.columns:
+                logger.info("Start ChatGPT-correcties voor foutieve vensters.")
+                predictions_df = apply_corrections_by_windows(df_for_corrections, corrector=chatgpt_corrector)
+                logger.info("ChatGPT-correcties afgerond.")
+            else:
+                logger.info("ChatGPT-correcties overgeslagen: geen foutinformatie beschikbaar.")
+        if run_structure_check:
+            after_gpt_csv = None
+            if export_features:
+                export_dir_path = Path(export_dir) if export_dir else Path("resultaat/csv")
+                after_gpt_csv = export_dir_path / f"{input_path.stem}_structure_check_aftergpt.csv"
+            structure_after_gpt = check_structure(
+                predictions_df,
+                export_csv_path=str(after_gpt_csv) if after_gpt_csv else None,
+                reset_errors=True,
+            )
+            if structure_after_gpt is not None:
+                for col in ("fout", "regel"):
+                    if col in structure_after_gpt.columns and col in predictions_df.columns:
+                        predictions_df[col] = structure_after_gpt[col]
+            logger.info("Structuurcheck uitgevoerd (na GPT).")
+
+        predictions_df = enforce_annex_nota_rules(predictions_df)
+
+        if run_structure_check:
+            final_structure_csv = None
+            if export_features:
+                export_dir_path = Path(export_dir) if export_dir else Path("resultaat/csv")
+                final_structure_csv = export_dir_path / f"{input_path.stem}_structure_check_afterpostprocess.csv"
+            structure_df_final = check_structure(
+                predictions_df,
+                export_csv_path=str(final_structure_csv) if final_structure_csv else None,
+                reset_errors=True,
+            )
+            if structure_df_final is not None:
+                for col in ("fout", "regel"):
+                    if col in structure_df_final.columns and col in predictions_df.columns:
+                        predictions_df[col] = structure_df_final[col]
+            logger.info("Structuurcheck uitgevoerd (na volledige postprocess).")
+
+        predictions_df = correct_numbering(predictions_df)
+        predictions_df = add_tables_and_images(predictions_df, extraction.tables, extraction.images)
+
+        output_document = doc_output_dir_path / f"inlaad_{Path(input_path).name}"
+        comments_generated, comments_include_errors = build_word_document(
+            predictions_df,
+            input_document=input_path,
+            output_document=output_document,
+            base_name=input_path.stem,
+        )
+        logger.info("Word-document gegenereerd: %s", output_document)
+        if comments_generated:
+            logger.info("Commentaar toegevoegd voor afwijkingen.")
+        if comments_include_errors:
+            logger.info("LET OP: Er zijn fouten gemarkeerd in het commentaar.")
 
     if export_features:
         export_dir = Path(export_dir) if export_dir else Path("resultaat/csv")
@@ -84,20 +153,24 @@ def process_document(
         base_name = input_path.stem
         paragraphs_csv = export_dir / f"{base_name}_paragraphs.csv"
         final_predictions_csv = export_dir / f"{base_name}_predictions_final.csv"
-        structure_csv_final = export_dir / f"{base_name}_structure_check.csv"
+        structure_csv_final = export_dir / f"{base_name}_structure_check_afterpostprocess.csv"
+        numbering_csv = export_dir / f"{base_name}_numbering.csv"
 
         paragraphs_df.to_csv(paragraphs_csv, sep=";", index=False)
 
         if predictions_df is not None:
             merged_pred = _merge_columns(paragraphs_df, predictions_df, on="volgnummer")
             merged_pred.to_csv(final_predictions_csv, sep=";", index=False)
-            if structure_df is not None:
-                merged_struct = _merge_columns(merged_pred, structure_df[["volgnummer", "fout", "regel"]], on="volgnummer")
+            if structure_df_final is not None:
+                merged_struct = _merge_columns(
+                    merged_pred, structure_df_final[["volgnummer", "fout", "regel"]], on="volgnummer"
+                )
                 merged_struct.to_csv(structure_csv_final, sep=";", index=False)
+            merged_pred.to_csv(numbering_csv, sep=";", index=False)
 
         logger.info("Export geschreven naar %s (paragraphs/predictions/structure)", export_dir)
 
-    return predictions_df, structure_df
+    return predictions_df, structure_df_final
 
 
 def setup_logging(log_dir: Optional[Path | str] = None) -> Path:
@@ -133,17 +206,19 @@ def _merge_columns(base_df: pd.DataFrame, other_df: pd.DataFrame, *, on: str) ->
     base = base_df.set_index(on)
     other = other_df.set_index(on)
 
-    combined_index = base.index.union(other.index)
-    base = base.reindex(combined_index)
+    combined = base.join(other, how="outer", lsuffix="", rsuffix="_new")
 
     for column in other.columns:
-        other_series = other[column]
-        if column in base.columns:
-            base[column] = base[column].combine_first(other_series)
-        else:
-            base[column] = other_series
+        new_col = f"{column}_new"
+        if new_col in combined.columns and column in combined.columns:
+            combined[column] = combined[column].combine_first(combined[new_col])
+            combined.drop(columns=[new_col], inplace=True)
+        elif new_col in combined.columns:
+            combined.rename(columns={new_col: column}, inplace=True)
 
-    return base.reset_index().sort_values(on)
+    result = combined.reset_index().sort_values(on)
+    result = result.loc[:, ~result.columns.duplicated()]
+    return result
 
 def main() -> None:
     import argparse
@@ -162,6 +237,10 @@ def main() -> None:
         help="Doelmap voor CSV-export (default: resultaat/csv).",
     )
     parser.add_argument(
+        "--doc-output-dir",
+        help="Doelmap voor Word-uitvoer (default: outputmap).",
+    )
+    parser.add_argument(
         "--no-predict",
         action="store_true",
         help="Sla de BERT-voorspellingen over.",
@@ -176,6 +255,11 @@ def main() -> None:
         action="store_true",
         help="Sla de structuurcontrole over.",
     )
+    parser.add_argument(
+        "--no-gpt",
+        action="store_true",
+        help="Sla de ChatGPT-correcties over.",
+    )
     args = parser.parse_args()
 
     log_file = setup_logging()
@@ -185,9 +269,11 @@ def main() -> None:
         args.input,
         export_features=not args.no_export,
         export_dir=args.export_dir,
+        doc_output_dir=args.doc_output_dir,
         run_predictions=not args.no_predict,
         ensure_title_step=not args.no_title,
         run_structure_check=not args.no_structure,
+        run_gpt_corrections=not args.no_gpt,
     )
 
 
