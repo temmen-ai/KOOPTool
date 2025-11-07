@@ -1,0 +1,31 @@
+cat > .gitignore << 'EOF'
+# Python
+__pycache__/
+*.pyc
+.venv/
+.env
+.env.*
+
+# Data & modellen (NIET in Git)
+finetuned_BERTmodel2_ronde2/
+data/
+inputmap/
+outputmap/
+logging/
+*.bin
+*.pt
+*.pth
+*.ckpt
+*.parquet
+*.csv
+*.zip
+
+# Node/Frontend (indien van toepassing)
+node_modules/
+dist/
+.next/
+
+# OS/IDE
+.DS_Store
+.vscode/
+EOF
