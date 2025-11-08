@@ -224,7 +224,7 @@ def voeg_entries_toe_from_dataframe(numbering_xml_tree, read_new_numbering_df):
             ET.SubElement(lvl_elem, f"{{{namespace}}}numFmt", attrib={f"{{{namespace}}}val": num_fmt_val})
 
             if opsommingstype == "bullet":
-                lvl_text = "\uf0b7"
+                lvl_text = row.get("num_properties", {}).get("lvlText") or "\uf0b7"
             elif opsommingstype == "nummer_o":
                 lvl_text = f"%{niveau + 1}°."
             else:
