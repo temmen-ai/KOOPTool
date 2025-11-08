@@ -176,6 +176,7 @@ def correct_numbering(
 
     corrected = _infer_levels_for_unstyled_lists(corrected)
     corrected = _promote_letter_after_number(corrected)
+    corrected = _restore_levels_by_bron(corrected)
     corrected["niveau"] = pd.to_numeric(corrected["niveau"], errors="coerce").fillna(0).astype(int)
 
     if output_csv:
@@ -640,6 +641,42 @@ def _leading_numeric_value(df: pd.DataFrame, idx) -> Optional[int]:
         # No whitespace and no punctuation boundary -> treat as plain text
         continue
     return None
+
+
+def _restore_levels_by_bron(df: pd.DataFrame) -> pd.DataFrame:
+    if "bron_numId" not in df.columns:
+        return df
+
+    baselines: dict[str, int] = {}
+    last_bron: Optional[str] = None
+
+    for idx, row in df.iterrows():
+        if _to_int(row.get("numbered"), 0) != 1:
+            continue
+
+        bron = row.get("bron_numId")
+        if bron in (None, "", "None", "nan"):
+            continue
+        bron_key = str(bron)
+        ops = str(row.get("opsommingstype") or "")
+        level = _to_int(row.get("niveau"), 0)
+
+        if ops == "kleine letter" and bron_key not in baselines:
+            baselines[bron_key] = level
+
+        if (
+            ops == "kleine letter"
+            and bron_key in baselines
+            and level > baselines[bron_key]
+        ):
+            target = baselines[bron_key]
+            df.at[idx, "niveau"] = target
+            if "indented" in df.columns:
+                df.at[idx, "indented"] = target
+
+        last_bron = bron_key
+
+    return df
 
 
 def _num_signature(row) -> Optional[tuple]:
