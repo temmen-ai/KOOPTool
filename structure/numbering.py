@@ -91,8 +91,12 @@ def correct_numbering(
             }
             for type_key, pattern in patterns.items():
                 if re.match(pattern, text):
-                    df.at[index, "tekst"] = re.sub(pattern, "", text).lstrip()
+                    new_text_raw = re.sub(pattern, "", text)
+                    new_text = new_text_raw.lstrip()
+                    trim_len = len(text) - len(new_text)
+                    df.at[index, "tekst"] = new_text
                     df.at[index, "numbered"] = 1
+                    _strip_textparts_prefix(df, index, trim_len)
                     opsommingstype = type_key
                     is_opsomming = True
                     break
@@ -480,6 +484,42 @@ def _detect_case1_merge_targets(df: pd.DataFrame) -> set:
         ):
             targets.add(prev.get("volgnummer"))
     return targets
+
+
+def _strip_textparts_prefix(df: pd.DataFrame, index: int, trim_len: int) -> None:
+    if trim_len <= 0:
+        return
+    if "textparts" not in df.columns:
+        return
+    parts = df.at[index, "textparts"]
+    if not isinstance(parts, list) or not parts:
+        return
+
+    remaining = trim_len
+    new_parts = []
+    removed_entries = 0
+
+    for part in parts:
+        part_str = part if isinstance(part, str) else str(part)
+        if remaining <= 0:
+            new_parts.append(part_str)
+            continue
+        if len(part_str) <= remaining:
+            remaining -= len(part_str)
+            removed_entries += 1
+            continue
+        new_parts.append(part_str[remaining:])
+        remaining = 0
+
+    if not new_parts:
+        new_parts = [""]
+    df.at[index, "textparts"] = new_parts
+
+    for fmt_col in ("textpartformats_b", "textpartformats_i", "textpartformats_u"):
+        if fmt_col in df.columns:
+            fmt = df.at[index, fmt_col]
+            if isinstance(fmt, list) and fmt:
+                df.at[index, fmt_col] = fmt[removed_entries:]
 
 
 def _normalize_num_id(value) -> Optional[str]:
