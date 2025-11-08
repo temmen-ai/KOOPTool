@@ -46,6 +46,9 @@ def correct_numbering(
     else:
         df["niveau"] = pd.Series([pd.NA] * len(df))
 
+    df["niveau_bron"] = df["niveau"].copy()
+    df["indented_bron"] = df["indented"].copy()
+
     if "opsommingstype" not in df.columns:
         df["opsommingstype"] = None
 
