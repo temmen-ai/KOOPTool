@@ -176,6 +176,7 @@ def correct_numbering(
 
     corrected = _infer_levels_for_unstyled_lists(corrected)
     corrected = _promote_letter_after_number(corrected)
+    corrected = _enforce_levels_from_properties(corrected)
     corrected["niveau"] = pd.to_numeric(corrected["niveau"], errors="coerce").fillna(0).astype(int)
 
     if output_csv:
@@ -559,23 +560,78 @@ def _promote_letter_after_number(df: pd.DataFrame) -> pd.DataFrame:
             continue
         level = _safe_int(row.get("niveau"), 0)
 
-        entry = state.setdefault(num_id, {"type": None, "level": 0, "last_number_level": None})
+        entry = state.setdefault(
+            num_id,
+            {"type": None, "level": 0, "last_number_level": None, "last_letter_level": None},
+        )
 
         last_number_level = entry.get("last_number_level")
         if current_type == "nummer":
             entry["last_number_level"] = level
-        elif current_type == "kleine letter" and last_number_level is not None:
-            target_level = max(last_number_level + 1, 1)
-            if level < target_level:
-                df.at[idx, "niveau"] = target_level
-                if "indented" in df.columns:
-                    df.at[idx, "indented"] = target_level
-            level = max(level, target_level)
+        elif current_type == "kleine letter":
+            if last_number_level is not None:
+                target_level = max(last_number_level + 1, 1)
+                if level < target_level:
+                    df.at[idx, "niveau"] = target_level
+                    if "indented" in df.columns:
+                        df.at[idx, "indented"] = target_level
+                level = max(level, target_level)
+            entry["last_letter_level"] = level
+        elif current_type == "nummer_o":
+            last_letter = entry.get("last_letter_level")
+            source_level = last_letter if last_letter is not None else last_number_level
+            if source_level is not None:
+                target_level = max(source_level + 1, 1)
+                if level < target_level:
+                    df.at[idx, "niveau"] = target_level
+                    if "indented" in df.columns:
+                        df.at[idx, "indented"] = target_level
+                level = max(level, target_level)
 
         entry["type"] = current_type
         entry["level"] = level
 
     return df
+
+
+def _enforce_levels_from_properties(df: pd.DataFrame) -> pd.DataFrame:
+    if "num_properties" not in df.columns:
+        return df
+    for idx, row in df.iterrows():
+        expected = _level_from_properties(row.get("num_properties"))
+        if expected is None:
+            continue
+        current = _to_int(row.get("niveau"), 0)
+        if current < expected:
+            df.at[idx, "niveau"] = expected
+    return df
+
+
+def _level_from_properties(props) -> Optional[int]:
+    if isinstance(props, str):
+        try:
+            props = ast.literal_eval(props)
+        except Exception:
+            return None
+    if not isinstance(props, dict):
+        return None
+
+    ilvl = props.get("ilvl")
+    if ilvl is not None:
+        try:
+            return max(int(ilvl), 0)
+        except Exception:
+            pass
+
+    lvl_text = props.get("lvlText")
+    if isinstance(lvl_text, str):
+        match = re.match(r"%\s*(\d+)", lvl_text.strip())
+        if match:
+            try:
+                return max(int(match.group(1)) - 1, 0)
+            except Exception:
+                return None
+    return None
 
 
 def _looks_like_visual_level0(row) -> bool:
