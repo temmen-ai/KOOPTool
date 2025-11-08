@@ -4,6 +4,7 @@ import logging
 import re
 from typing import Optional
 
+import ast
 import pandas as pd
 from lxml import etree as ET
 
@@ -75,18 +76,22 @@ def correct_numbering(
         opsommingstype = None
 
         if not is_opsomming:
+            latin_letters = "A-Za-zÀ-ÖØ-öø-ÿ"
+            digit_boundary = r"(?:\s+|(?=[^0-9]))"
+            letter_boundary = rf"(?:\s+|(?=[{latin_letters}]))"
+
             patterns = {
                 "bullet": r"^(?:\-|\•|°)\s*",
-                "kleine letter": r"^[a-z][\.\)]?\s+",
-                "nummer_o": r"^\d+[oO°º][\.\)]?\s+",
-                "nummer": r"^\d+[\.\)]?\s+",
-                "hoofdletter": r"^[A-Z][\.\)]?\s+",
-                "romeins cijfer klein": r"^(ix|iv|v?i{0,3})[\.\)]?\s+",
-                "romeins cijfer groot": r"^(IX|IV|V?I{0,3})[\.\)]?\s+",
+                "kleine letter": rf"^(?:[a-z]\s+|[a-z][\.\)]{letter_boundary})",
+                "nummer_o": rf"^(?:\d+[oO°º]\s+|\d+[oO°º][\.\)]{letter_boundary})",
+                "nummer": rf"^(?:\d+\s+|\d+[\.\)]{digit_boundary})",
+                "hoofdletter": rf"^(?:[A-Z]\s+|[A-Z][\.\)]{letter_boundary})",
+                "romeins cijfer klein": rf"^(?:(ix|iv|v?i{{0,3}})\s+|(ix|iv|v?i{{0,3}})[\.\)]{letter_boundary})",
+                "romeins cijfer groot": rf"^(?:(IX|IV|V?I{{0,3}})\s+|(IX|IV|V?I{{0,3}})[\.\)]{letter_boundary})",
             }
             for type_key, pattern in patterns.items():
                 if re.match(pattern, text):
-                    df.at[index, "tekst"] = re.sub(pattern, "", text)
+                    df.at[index, "tekst"] = re.sub(pattern, "", text).lstrip()
                     df.at[index, "numbered"] = 1
                     opsommingstype = type_key
                     is_opsomming = True
@@ -105,30 +110,11 @@ def correct_numbering(
                 num_id_mapping[lijst_teller] = huidige_numId
             df.at[index, "numId"] = huidige_numId
 
+            if not opsommingstype:
+                opsommingstype = _opsommingstype_from_props(row.get("num_properties"), niveau=_to_int(row.get("niveau", 0), 0))
+
             if opsommingstype:
                 df.at[index, "opsommingstype"] = opsommingstype
-            else:
-                num_props = row.get("num_properties", {})
-                if isinstance(num_props, str):
-                    try:
-                        import ast
-
-                        num_props = ast.literal_eval(num_props)
-                    except Exception:
-                        num_props = {}
-                mapping = {
-                    "decimal": "nummer",
-                    "decimalZero": "nummer",
-                    "cardinalText": "nummer",
-                    "lowerLetter": "kleine letter",
-                    "upperLetter": "hoofdletter",
-                    "lowerRoman": "romeins cijfer klein",
-                    "upperRoman": "romeins cijfer groot",
-                    "bullet": "bullet",
-                }
-                num_fmt = (num_props or {}).get("numFmt")
-                if num_fmt:
-                    df.at[index, "opsommingstype"] = mapping.get(str(num_fmt), str(num_fmt))
 
             input_lvl = _to_int_nullable(niveau_input.iat[index])
             ind = _to_int(row.get("indented", 0), 0)
@@ -150,11 +136,42 @@ def correct_numbering(
                         if prev_input_lvl is None or prev_input_lvl == prev_lvl:
                             niveau = prev_lvl
 
+            if niveau > 0 and _looks_like_visual_level0(row):
+                niveau = 0
+                df.at[index, "indented"] = 0
             df.at[index, "niveau"] = int(niveau)
         else:
-            nieuwe_lijst = "Ja"
+            if profile not in {"OPLid", "Lijstalinea"}:
+                nieuwe_lijst = "Ja"
 
+    mask = df["opsommingstype"].isna()
+    if "num_properties" in df.columns:
+        df.loc[mask, "opsommingstype"] = df.loc[mask, "num_properties"].apply(
+            lambda props: _opsommingstype_from_props(props, niveau=None)
+        )
+
+    case1_targets = _detect_case1_merge_targets(df)
     corrected = post_numbering_cleanup(df)
+    if case1_targets:
+        if "fout" not in corrected.columns:
+            corrected["fout"] = 0
+        if "regel" not in corrected.columns:
+            corrected["regel"] = ""
+        target_mask = corrected["volgnummer"].isin(case1_targets)
+        corrected.loc[target_mask, "fout"] = corrected.loc[target_mask, "fout"].clip(lower=2)
+        corrected.loc[target_mask, "regel"] = corrected.loc[target_mask, "regel"].where(
+            corrected.loc[target_mask, "regel"].astype(bool),
+            "Deze zin is samengevoegd met 1 of meerdere vervolgzinnen uit het brondocument.",
+        )
+    corrected = _promote_letter_after_number(corrected)
+    mask_after = corrected["opsommingstype"].isna()
+    if mask_after.any() and "num_properties" in corrected.columns:
+        corrected.loc[mask_after, "opsommingstype"] = corrected.loc[
+            mask_after, "num_properties"
+        ].apply(lambda props: _opsommingstype_from_props(props, niveau=None))
+
+    corrected = _infer_levels_for_unstyled_lists(corrected)
+    corrected = _promote_letter_after_number(corrected)
     corrected["niveau"] = pd.to_numeric(corrected["niveau"], errors="coerce").fillna(0).astype(int)
 
     if output_csv:
@@ -202,7 +219,7 @@ def voeg_entries_toe_from_dataframe(numbering_xml_tree, read_new_numbering_df):
             ET.SubElement(lvl_elem, f"{{{namespace}}}numFmt", attrib={f"{{{namespace}}}val": num_fmt_val})
 
             if opsommingstype == "bullet":
-                lvl_text = "-"
+                lvl_text = "\uf0b7"
             elif opsommingstype == "nummer_o":
                 lvl_text = f"%{niveau + 1}°."
             else:
@@ -216,6 +233,17 @@ def voeg_entries_toe_from_dataframe(numbering_xml_tree, read_new_numbering_df):
                 f"{{{namespace}}}ind",
                 attrib={f"{{{namespace}}}left": str(left_indent), f"{{{namespace}}}hanging": "360"},
             )
+            rPr = ET.SubElement(lvl_elem, f"{{{namespace}}}rPr")
+            if opsommingstype == "bullet":
+                ET.SubElement(
+                    rPr,
+                    f"{{{namespace}}}rFonts",
+                    attrib={
+                        f"{{{namespace}}}ascii": "Symbol",
+                        f"{{{namespace}}}hAnsi": "Symbol",
+                        f"{{{namespace}}}hint": "default",
+                    },
+                )
 
         root.append(abstract_num)
         num = ET.Element(f"{{{namespace}}}num", attrib={f"{{{namespace}}}numId": abstract_num_id})
@@ -248,3 +276,334 @@ def _to_int_nullable(x):
         return int(v)
     except Exception:
         return None
+
+
+def _opsommingstype_from_props(num_props, niveau: Optional[int] = None) -> Optional[str]:
+    if isinstance(num_props, str):
+        try:
+            num_props = ast.literal_eval(num_props)
+        except Exception:
+            return None
+    if not isinstance(num_props, dict):
+        return None
+    num_fmt = num_props.get("numFmt")
+    if not num_fmt:
+        return None
+    level = niveau
+    if level is None:
+        try:
+            level = int(num_props.get("ilvl"))
+        except Exception:
+            level = 0
+
+    num_fmt = str(num_fmt)
+    if num_fmt in {"lowerLetter", "cardinalText"}:
+        return "kleine letter"
+    if num_fmt == "upperLetter":
+        return "hoofdletter"
+    if num_fmt in {"lowerRoman", "upperRoman"}:
+        return "nummer"
+    if num_fmt == "bullet":
+        return "bullet"
+    if num_fmt in {"decimal", "decimalZero"}:
+        return "nummer"
+    return num_fmt
+
+
+def _infer_levels_for_unstyled_lists(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+
+    def _safe_int(value, default=0):
+        try:
+            v = pd.to_numeric([value], errors="coerce")[0]
+            if pd.isna(v):
+                return default
+            return int(v)
+        except Exception:
+            return default
+
+    previous_level = 0
+    previous_type = None
+    current_list_id = None
+    force_level0 = False
+    expected_number = None
+    list_started = False
+    previous_indent = 0
+    previous_num_signature: Optional[tuple] = None
+
+    for idx in df.index:
+        row_data = df.loc[idx]
+        prof = row_data["opmaakprofiel"]
+        if prof not in {"OPLid", "Lijstalinea"}:
+            previous_type = None
+            current_list_id = None
+            force_level0 = False
+            expected_number = None
+            continue
+
+        if _safe_int(df.at[idx, "numbered"], 0) != 1:
+            # Geen onderdeel van een lijst: sla over maar behoud context
+            continue
+
+        ops = str(df.at[idx, "opsommingstype"] or "").lower()
+        if ops not in {"nummer", "kleine letter", "hoofdletter", "bullet"}:
+            previous_type = None
+            current_list_id = None
+            force_level0 = False
+            expected_number = None
+            continue
+
+        list_id = row_data.get("numId")
+        if list_id != current_list_id:
+            current_list_id = list_id
+            force_level0 = False
+            expected_number = None
+            previous_level = 0
+            list_started = False
+            previous_indent = 0
+            previous_num_signature = None
+
+        current_level = _safe_int(row_data.get("niveau"), 0)
+        if not list_started or (current_level > 0 and _looks_like_visual_level0(df.loc[idx])):
+            current_level = 0
+            df.at[idx, "niveau"] = 0
+        indent_raw = _safe_int(row_data.get("indented"), 0)
+        if not list_started:
+            previous_indent = indent_raw
+        indent_level = 1 if indent_raw > 0 else 0
+        base_level = current_level if current_level > 0 else 0
+
+        leading_number = _leading_numeric_value(df, idx)
+        if leading_number is not None:
+            if expected_number is None:
+                force_level0 = indent_raw == 0
+                expected_number = leading_number + 1
+            else:
+                if leading_number == expected_number:
+                    expected_number = leading_number + 1
+                else:
+                    force_level0 = False
+                    expected_number = leading_number + 1
+        else:
+            force_level0 = False
+            expected_number = None
+
+        def _reset_indents():
+            if "indented" in df.columns:
+                df.at[idx, "indented"] = 0
+            for col in ("tab_stops", "has_tab_runs", "first_line_indent", "hanging_indent"):
+                if col in df.columns:
+                    if col == "tab_stops":
+                        df.at[idx, col] = "[]"
+                    else:
+                        df.at[idx, col] = 0
+
+        if ops == "nummer":
+            if force_level0 and leading_number is not None:
+                previous_level = 0
+                df.at[idx, "niveau"] = 0
+                _reset_indents()
+                previous_type = ops
+                continue
+            if current_level == 0:
+                base_level = 0
+            previous_level = base_level
+            df.at[idx, "niveau"] = previous_level
+            _reset_indents()
+        elif ops == "hoofdletter":
+            previous_level = max(base_level, previous_level)
+            df.at[idx, "niveau"] = previous_level
+        elif ops == "kleine letter":
+            current_signature = _num_signature(row_data)
+            if not list_started:
+                previous_level = 0
+            elif previous_type == "bullet":
+                candidate = previous_level - 1 if previous_level > 0 else 0
+                previous_level = max(base_level, candidate)
+            elif previous_type in {"nummer", "hoofdletter"}:
+                previous_level = max(base_level, previous_level + 1)
+            elif previous_type == "kleine letter":
+                if current_signature and previous_num_signature == current_signature:
+                    previous_level = previous_level
+                elif indent_raw <= previous_indent:
+                    previous_level = previous_level
+                else:
+                    previous_level = max(base_level, previous_level + 1)
+            else:
+                previous_level = base_level
+            df.at[idx, "niveau"] = previous_level
+        elif ops == "bullet":
+            if previous_type in {"nummer", "hoofdletter", "kleine letter"}:
+                target = max(previous_level + 1, indent_level or 1)
+            elif previous_type == "bullet":
+                target = max(previous_level, indent_level, base_level)
+            else:
+                target = max(base_level, 1 if indent_raw > 0 else 0)
+            previous_level = target
+            df.at[idx, "niveau"] = previous_level
+            force_level0 = False
+            expected_number = None
+        previous_type = ops
+        list_started = True
+        previous_indent = indent_raw
+        if ops == "kleine letter":
+            previous_num_signature = current_signature
+        else:
+            previous_num_signature = _num_signature(row_data)
+
+    return df
+
+
+def _detect_case1_merge_targets(df: pd.DataFrame) -> set:
+    PROFILES = {"OPLid", "Lijstalinea"}
+
+    def _valid_numid(value) -> bool:
+        if pd.isna(value):
+            return False
+        text = str(value).strip().lower()
+        return text not in {"", "none", "nan"}
+
+    targets: set = set()
+    for i in range(1, len(df) - 1):
+        row = df.iloc[i]
+        if row.get("opmaakprofiel") not in PROFILES:
+            continue
+        if _valid_numid(row.get("numId")):
+            continue
+        prev = df.iloc[i - 1]
+        nxt = df.iloc[i + 1]
+        if (
+            prev.get("opmaakprofiel") in PROFILES
+            and nxt.get("opmaakprofiel") in PROFILES
+            and _valid_numid(prev.get("numId"))
+            and str(prev.get("numId")) == str(nxt.get("numId"))
+        ):
+            targets.add(prev.get("volgnummer"))
+    return targets
+
+
+def _normalize_num_id(value) -> Optional[str]:
+    if value in (None, "", "None"):
+        return None
+    try:
+        as_int = int(float(value))
+        return str(as_int)
+    except Exception:
+        return str(value).strip()
+
+
+def _promote_letter_after_number(df: pd.DataFrame) -> pd.DataFrame:
+    PROFILES = {"OPLid", "Lijstalinea"}
+
+    def _safe_int(value, default=0):
+        try:
+            v = pd.to_numeric([value], errors="coerce")[0]
+            if pd.isna(v):
+                return default
+            return int(v)
+        except Exception:
+            return default
+
+    state: dict[str, dict[str, int | None]] = {}
+    for idx, row in df.iterrows():
+        profile = row.get("opmaakprofiel")
+        if profile not in PROFILES:
+            continue
+        if _safe_int(row.get("numbered"), 0) != 1:
+            continue
+
+        current_type = str(row.get("opsommingstype") or "").lower()
+        num_id = _normalize_num_id(row.get("numId"))
+        if num_id is None:
+            state.clear()
+            continue
+        level = _safe_int(row.get("niveau"), 0)
+
+        entry = state.setdefault(num_id, {"type": None, "level": 0, "last_number_level": None})
+
+        last_number_level = entry.get("last_number_level")
+        if current_type == "nummer":
+            entry["last_number_level"] = level
+        elif current_type == "kleine letter" and last_number_level is not None:
+            target_level = max(last_number_level + 1, 1)
+            if level < target_level:
+                df.at[idx, "niveau"] = target_level
+                if "indented" in df.columns:
+                    df.at[idx, "indented"] = target_level
+            level = max(level, target_level)
+
+        entry["type"] = current_type
+        entry["level"] = level
+
+    return df
+
+
+def _looks_like_visual_level0(row) -> bool:
+    try:
+        ind = _to_int(row.get("indented", 0), 0)
+        first_line = _to_int(row.get("first_line_indent", 0), 0)
+        hanging = _to_int(row.get("hanging_indent", 0), 0)
+    except Exception:
+        return False
+
+    if ind > 1:
+        return False
+    if first_line >= 0 or hanging <= 0:
+        return False
+
+    if abs(abs(first_line) - hanging) <= 150:  # allow small rounding differences
+        return True
+    return False
+
+
+def _leading_numeric_value(df: pd.DataFrame, idx) -> Optional[int]:
+    for column in ("leading_text", "leading_run_text"):
+        if column not in df.columns:
+            continue
+        raw = str(df.at[idx, column] or "").strip()
+        if not raw:
+            continue
+
+        pos = 0
+        while pos < len(raw) and raw[pos].isdigit():
+            pos += 1
+        if pos == 0:
+            continue
+
+        number_part = raw[:pos]
+        remainder = raw[pos:]
+        had_punctuation = False
+
+        if remainder.startswith((".", ")")):
+            had_punctuation = True
+            remainder = remainder[1:]
+
+        if not remainder:
+            return int(number_part)
+
+        if remainder[0].isspace():
+            return int(number_part)
+
+        if had_punctuation and remainder[0].isalpha():
+            return int(number_part)
+
+        # No whitespace and no punctuation boundary -> treat as plain text
+        continue
+    return None
+
+
+def _num_signature(row) -> Optional[tuple]:
+    props = row.get("num_properties")
+    if isinstance(props, str):
+        try:
+            props = ast.literal_eval(props)
+        except Exception:
+            props = {}
+    if not isinstance(props, dict):
+        props = {}
+    return (
+        row.get("numId"),
+        props.get("abstractNumId"),
+        props.get("lvlText"),
+        props.get("numFmt"),
+    )

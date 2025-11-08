@@ -54,6 +54,7 @@ def process_document(
     title_added = False
     structure_df_before = None
     structure_df_final = None
+    structure_snapshot_after_post = None
     doc_output_dir_path = Path(doc_output_dir) if doc_output_dir else Path("outputmap")
     paragraphs_df = pd.DataFrame(paragraphs_to_dicts(extraction.paragraphs))
     if run_predictions:
@@ -61,6 +62,9 @@ def process_document(
         logger.info("BERT-model geladen, start sliding-window voorspellingen.")
         predictions_df = predictor.predict(extraction.paragraphs)
         logger.info("Voorspellingen voltooid voor %d paragrafen.", len(extraction.paragraphs))
+
+        # Zorg dat alle downstream stappen (en CSV's) over dezelfde kolommen beschikken.
+        predictions_df = _merge_columns(paragraphs_df, predictions_df, on="volgnummer")
 
         if export_features:
             raw_pred_csv = (Path(export_dir) if export_dir else Path("resultaat/csv")) / f"{input_path.stem}_predictions_raw.csv"
@@ -130,6 +134,15 @@ def process_document(
                         predictions_df[col] = structure_df_final[col]
             logger.info("Structuurcheck uitgevoerd (na volledige postprocess).")
 
+        metadata_cols = ["num_properties", "bron_numId"]
+        existing_cols = [c for c in metadata_cols if c in paragraphs_df.columns]
+        if existing_cols:
+            metadata_df = paragraphs_df[["volgnummer", *existing_cols]]
+            predictions_df = _merge_columns(predictions_df, metadata_df, on="volgnummer")
+
+        if structure_df_final is not None and structure_snapshot_after_post is None:
+            structure_snapshot_after_post = predictions_df.copy()
+
         predictions_df = correct_numbering(predictions_df)
         predictions_df = add_tables_and_images(predictions_df, extraction.tables, extraction.images)
 
@@ -159,14 +172,19 @@ def process_document(
         paragraphs_df.to_csv(paragraphs_csv, sep=";", index=False)
 
         if predictions_df is not None:
-            merged_pred = _merge_columns(paragraphs_df, predictions_df, on="volgnummer")
-            merged_pred.to_csv(final_predictions_csv, sep=";", index=False)
-            if structure_df_final is not None:
+            final_predictions_df = predictions_df.copy()
+            final_predictions_df.to_csv(final_predictions_csv, sep=";", index=False)
+
+            if structure_snapshot_after_post is not None:
+                structure_snapshot_after_post.to_csv(structure_csv_final, sep=";", index=False)
+            elif structure_df_final is not None:
+                # Fallback: voeg fout/regel toe aan de huidige staat.
                 merged_struct = _merge_columns(
-                    merged_pred, structure_df_final[["volgnummer", "fout", "regel"]], on="volgnummer"
+                    final_predictions_df, structure_df_final[["volgnummer", "fout", "regel"]], on="volgnummer"
                 )
                 merged_struct.to_csv(structure_csv_final, sep=";", index=False)
-            merged_pred.to_csv(numbering_csv, sep=";", index=False)
+
+            final_predictions_df.to_csv(numbering_csv, sep=";", index=False)
 
         logger.info("Export geschreven naar %s (paragraphs/predictions/structure)", export_dir)
 
@@ -218,6 +236,7 @@ def _merge_columns(base_df: pd.DataFrame, other_df: pd.DataFrame, *, on: str) ->
 
     result = combined.reset_index().sort_values(on)
     result = result.loc[:, ~result.columns.duplicated()]
+    result = result.drop_duplicates(subset=[on], keep="last").sort_values(on)
     return result
 
 def main() -> None:

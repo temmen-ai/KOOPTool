@@ -90,7 +90,7 @@ def quiet_libraries():
     logging.getLogger("urllib3").setLevel(logging.ERROR)
 
 
-def process_file(input_path: Path, output_dir: Path, verwerk_bestand) -> bool:
+def process_file(input_path: Path, output_dir: Path, process_document) -> bool:
     """
     Verwerk één bestand.
     - Retourneert True bij succes, False bij fout.
@@ -99,8 +99,11 @@ def process_file(input_path: Path, output_dir: Path, verwerk_bestand) -> bool:
     start = perf_counter()
     logging.info(f"Start: {input_path.name}")
     try:
-        modelkeuze = 'BERT'
-        verwerk_bestand(input_path, output_dir, modelkeuze)
+        process_document(
+            input_path,
+            export_dir=Path("resultaat/csv"),
+            doc_output_dir=output_dir,
+        )
         elapsed = perf_counter() - start
         logging.info(f"Gereed: {input_path.name} (duur: {elapsed:.2f}s)")
         return True
@@ -119,7 +122,7 @@ def main():
 
     # === 3) Nu pas zware imports doen (alles gaat naar de log, niet naar shell) ===
     with suppress_import_output():
-        from DaadkrachtBatch import verwerk_bestand
+        from koop_pipeline import process_document
 
     # === 4) CLI-argumenten verwerken ===
     if len(sys.argv) != 3:
@@ -147,7 +150,7 @@ def main():
     ok = fail = 0
 
     for f in files:
-        if process_file(f, output_dir, verwerk_bestand):
+        if process_file(f, output_dir, process_document):
             ok += 1
         else:
             fail += 1  # ga door met volgende bestand

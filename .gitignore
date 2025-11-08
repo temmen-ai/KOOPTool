@@ -12,6 +12,8 @@ data/
 inputmap/
 outputmap/
 logging/
+testdocs/
+resultaat/
 *.bin
 *.pt
 *.pth
