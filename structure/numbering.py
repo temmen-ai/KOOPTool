@@ -188,6 +188,19 @@ def correct_numbering(
     return corrected
 
 
+OPS_NUMFMT_MAP = {
+    "nummer": "decimal",
+    "kleine letter": "lowerLetter",
+    "bullet": "bullet",
+    "hoofdletter": "upperLetter",
+    "romeins cijfer klein": "lowerRoman",
+    "romeins cijfer groot": "upperRoman",
+    "nummer_o": "decimal",
+}
+
+BULLET_SYMBOLS = {"•", "◦", "∙", "·", "●", "○", "‣", "⁃", "-", "–", "—", "▪", "▫", "■", "□"}
+
+
 def voeg_entries_toe_from_dataframe(numbering_xml_tree, read_new_numbering_df):
     root = numbering_xml_tree.getroot()
     namespace = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -211,23 +224,20 @@ def voeg_entries_toe_from_dataframe(numbering_xml_tree, read_new_numbering_df):
 
         for _, row in group.drop_duplicates(subset=["niveau"]).iterrows():
             niveau = int(row["niveau"])
-            opsommingstype = row.get("opsommingstype")
-            num_fmt_val = {
-                "nummer": "decimal",
-                "kleine letter": "lowerLetter",
-                "bullet": "bullet",
-                "hoofdletter": "upperLetter",
-                "romeins cijfer klein": "lowerRoman",
-                "romeins cijfer groot": "upperRoman",
-                "nummer_o": "decimal",
-            }.get(opsommingstype, "decimal")
+            raw_ops = row.get("opsommingstype")
+            opsommingstype, bullet_symbol = _normalize_opsommingstype(raw_ops)
+            num_fmt_val = OPS_NUMFMT_MAP.get(opsommingstype, "decimal")
 
             lvl_elem = ET.SubElement(abstract_num, f"{{{namespace}}}lvl", attrib={f"{{{namespace}}}ilvl": str(niveau)})
             ET.SubElement(lvl_elem, f"{{{namespace}}}start", attrib={f"{{{namespace}}}val": "1"})
             ET.SubElement(lvl_elem, f"{{{namespace}}}numFmt", attrib={f"{{{namespace}}}val": num_fmt_val})
 
             if opsommingstype == "bullet":
-                lvl_text = row.get("num_properties", {}).get("lvlText") or "\uf0b7"
+                lvl_text = (
+                    bullet_symbol
+                    or _extract_bullet_from_props(row.get("num_properties"))
+                    or "\uf0b7"
+                )
             elif opsommingstype == "nummer_o":
                 lvl_text = f"%{niveau + 1}°."
             else:
@@ -264,6 +274,38 @@ def voeg_entries_toe_from_dataframe(numbering_xml_tree, read_new_numbering_df):
         root.append(num_element)
 
     return numbering_xml_tree
+
+
+def _normalize_opsommingstype(value) -> tuple[str, Optional[str]]:
+    text = str(value or "").strip()
+    if not text:
+        return "", None
+    lowered = text.lower()
+    if lowered == "bullet":
+        return "bullet", None
+    if text in BULLET_SYMBOLS:
+        return "bullet", text
+    if len(text) == 1 and not text.isalnum():
+        return "bullet", text
+    if lowered in OPS_NUMFMT_MAP:
+        return lowered, None
+    return text, None
+
+
+def _extract_bullet_from_props(num_props) -> Optional[str]:
+    if isinstance(num_props, str):
+        try:
+            num_props = ast.literal_eval(num_props)
+        except Exception:
+            num_props = None
+    if isinstance(num_props, dict):
+        raw = num_props.get("lvlText")
+        if isinstance(raw, str) and raw.strip():
+            text = raw.strip()
+            if text in BULLET_SYMBOLS or (len(text) == 1 and not text.isalnum()):
+                return text
+            return text
+    return None
 
 
 def _to_int(x, default=0):

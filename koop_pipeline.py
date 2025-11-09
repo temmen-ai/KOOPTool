@@ -14,9 +14,19 @@ from ml.predictor import BertOpmaakprofielPredictor
 from services.title_resolver import ensure_title
 from structure.checker import check_structure
 from structure.postprocess import enforce_annex_nota_rules
-from structure.numbering import correct_numbering
 from structure.tables_images import add_tables_and_images
+from structure.new_numbering import (
+    initialize_numbering,
+    infer_opsommingstype,
+    merge_bridge_sentences,
+    assign_consecutive_numids,
+    enforce_list_baseline,
+    apply_level_rules,
+    prepare_word_numbering,
+)
 from writers.doc_builder import build_word_document
+
+WORD_EXPORT_ENABLED = True
 
 logger = logging.getLogger(__name__)
 
@@ -143,21 +153,30 @@ def process_document(
         if structure_df_final is not None and structure_snapshot_after_post is None:
             structure_snapshot_after_post = predictions_df.copy()
 
-        predictions_df = correct_numbering(predictions_df)
-        predictions_df = add_tables_and_images(predictions_df, extraction.tables, extraction.images)
+        predictions_df = initialize_numbering(predictions_df)
+        predictions_df = infer_opsommingstype(predictions_df)
+        predictions_df = merge_bridge_sentences(predictions_df)
+        predictions_df = assign_consecutive_numids(predictions_df)
+        predictions_df = enforce_list_baseline(predictions_df)
+        predictions_df = apply_level_rules(predictions_df)
 
-        output_document = doc_output_dir_path / f"inlaad_{Path(input_path).name}"
-        comments_generated, comments_include_errors = build_word_document(
-            predictions_df,
-            input_document=input_path,
-            output_document=output_document,
-            base_name=input_path.stem,
-        )
-        logger.info("Word-document gegenereerd: %s", output_document)
-        if comments_generated:
-            logger.info("Commentaar toegevoegd voor afwijkingen.")
-        if comments_include_errors:
-            logger.info("LET OP: Er zijn fouten gemarkeerd in het commentaar.")
+        if WORD_EXPORT_ENABLED:
+            word_df = prepare_word_numbering(predictions_df)
+            word_df = add_tables_and_images(word_df, extraction.tables, extraction.images)
+            output_document = doc_output_dir_path / f"inlaad_{Path(input_path).name}"
+            comments_generated, comments_include_errors = build_word_document(
+                word_df,
+                input_document=input_path,
+                output_document=output_document,
+                base_name=input_path.stem,
+            )
+            logger.info("Word-document gegenereerd: %s", output_document)
+            if comments_generated:
+                logger.info("Commentaar toegevoegd voor afwijkingen.")
+            if comments_include_errors:
+                logger.info("LET OP: Er zijn fouten gemarkeerd in het commentaar.")
+        else:
+            logger.info("Word-export is tijdelijk uitgeschakeld.")
 
     if export_features:
         export_dir = Path(export_dir) if export_dir else Path("resultaat/csv")
@@ -173,6 +192,7 @@ def process_document(
 
         if predictions_df is not None:
             final_predictions_df = predictions_df.copy()
+            final_predictions_df["niveau_voor_check"] = final_predictions_df.get("niveau")
             final_predictions_df.to_csv(final_predictions_csv, sep=";", index=False)
 
             if structure_snapshot_after_post is not None:
