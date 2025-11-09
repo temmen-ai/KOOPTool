@@ -8,8 +8,8 @@ from typing import Optional, Tuple
 import pandas as pd
 from lxml import etree as ET
 
-from DaadkrachtBatch import DocxHelper  # reuse existing helper
-from structure.numbering import voeg_entries_toe_from_dataframe
+from writers.docx_helper import DocxHelper
+from structure.numbering_xml import voeg_entries_toe_from_dataframe
 
 
 def escape_placeholders(text: str) -> str:

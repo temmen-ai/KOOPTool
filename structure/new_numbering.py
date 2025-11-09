@@ -5,7 +5,8 @@ import re
 from typing import Optional
 
 import pandas as pd
-from structure.numbering import post_numbering_cleanup, _detect_case1_merge_targets
+from structure.post_numbering_cleanup import post_numbering_cleanup
+from structure.case_detection import _detect_case1_merge_targets
 
 
 def _to_int(value, default=0):
