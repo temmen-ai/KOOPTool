@@ -25,14 +25,18 @@ BRON_COLUMNS = (
     ("numId", "numId_bron"),
 )
 
+LATIN_LETTERS = "A-Za-zÀ-ÖØ-öø-ÿ"
+DIGIT_BOUNDARY = r"(?:\s+|(?=[^0-9]))"
+LETTER_BOUNDARY = rf"(?:\s+|(?=[{LATIN_LETTERS}]))"
+
 OPS_PATTERNS = {
     "bullet": r"^(?:\-|\•|°)\s*",
-    "kleine letter": r"^(?:[a-z]\s+|[a-z][\.)]\s+)",
-    "nummer_o": r"^(?:\d+[oO°º]\s+|\d+[oO°º][\.)]\s+)",
-    "nummer": r"^(?:\d+\s+|\d+[\.)]\s+)",
-    "hoofdletter": r"^(?:[A-Z]\s+|[A-Z][\.)]\s+)",
-    "romeins cijfer klein": r"^(?:(ix|iv|v?i{0,3})\s+|(ix|iv|v?i{0,3})[\.)]\s+)",
-    "romeins cijfer groot": r"^(?:(IX|IV|V?I{0,3})\s+|(IX|IV|V?I{0,3})[\.)]\s+)",
+    "kleine letter": rf"^(?:[a-z]\s+|[a-z][\.\)]{LETTER_BOUNDARY})",
+    "nummer_o": rf"^(?:\d+[oO°º]\s+|\d+[oO°º][\.\)]{LETTER_BOUNDARY})",
+    "nummer": rf"^(?:\d+\s+|\d+[\.\)]{DIGIT_BOUNDARY})",
+    "hoofdletter": rf"^(?:[A-Z]\s+|[A-Z][\.\)]{LETTER_BOUNDARY})",
+    "romeins cijfer klein": rf"^(?:(ix|iv|v?i{{0,3}})\s+|(ix|iv|v?i{{0,3}})[\.\)]{LETTER_BOUNDARY})",
+    "romeins cijfer groot": rf"^(?:(IX|IV|V?I{{0,3}})\s+|(IX|IV|V?I{{0,3}})[\.\)]{LETTER_BOUNDARY})",
 }
 
 
@@ -139,7 +143,7 @@ def apply_level_rules(df: pd.DataFrame) -> pd.DataFrame:
         if pd.isna(num_id):
             continue
         key = str(num_id)
-        state = states.setdefault(key, {"last": None, "signatures": {}})
+        state = states.setdefault(key, {"last": None, "signatures": {}, "type_levels": {}})
 
         ops = str(df.at[idx, "opsommingstype"] or "").strip()
         if not ops:
@@ -167,7 +171,15 @@ def apply_level_rules(df: pd.DataFrame) -> pd.DataFrame:
             if known is not None:
                 target_level = known
             else:
-                target_level = last["level"] + 1 if last else 0
+                bron_numbered = _to_int(df.at[idx, "genummerd_bron"], 0) if "genummerd_bron" in df.columns else 0
+                type_levels = state["type_levels"]
+                fallback_level = type_levels.get(ops)
+                if last and ops == last["ops"] and bron_numbered == 0:
+                    target_level = last["level"]
+                elif fallback_level is not None and bron_level <= fallback_level:
+                    target_level = fallback_level
+                else:
+                    target_level = last["level"] + 1 if last else 0
                 state["signatures"][signature] = target_level
 
         df.at[idx, "niveau"] = target_level
@@ -180,6 +192,7 @@ def apply_level_rules(df: pd.DataFrame) -> pd.DataFrame:
             "bron_level": bron_level,
             "bron_id": bron_id,
         }
+        state["type_levels"][ops] = target_level
         state["signatures"].setdefault(_signature_for_row(row=df.loc[idx]), target_level)
 
     return df
