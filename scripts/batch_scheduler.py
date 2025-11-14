@@ -22,17 +22,22 @@ INPUT_DIR = PROJECT_DIR / "inputmap"
 OUTPUT_DIR = PROJECT_DIR / "outputmap"
 LOG_FILE = Path("/Users/denizayhan/koop_batch_scheduler.log")
 
-RUN_HOUR = 22
-RUN_MINUTE = 0
+RUN_TIMES = sorted({
+    (10, 0),  # Voorbeeld: 10:00
+    (22, 0),  # Voorbeeld: 22:00
+})
 
 
 def next_run(after: datetime | None = None) -> datetime:
     """Bepaal het eerstvolgende moment waarop we moeten draaien."""
     after = after or datetime.now()
-    candidate = after.replace(hour=RUN_HOUR, minute=RUN_MINUTE, second=0, microsecond=0)
-    if candidate <= after:
-        candidate += timedelta(days=1)
-    return candidate
+    candidates = []
+    for hour, minute in RUN_TIMES:
+        candidate = after.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if candidate <= after:
+            candidate += timedelta(days=1)
+        candidates.append(candidate)
+    return min(candidates)
 
 
 def log(message: str) -> None:
@@ -67,7 +72,7 @@ def run_batch() -> None:
 def main() -> None:
     log("Scheduler gestart.")
     wait_until = next_run()
-    log(f"Eerste run gepland op {wait_until}.")
+    log(f"Eerste run gepland op {wait_until}. Dagelijkse tijden: {RUN_TIMES}")
     while True:
         now = datetime.now()
         if now >= wait_until:
