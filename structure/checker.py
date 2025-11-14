@@ -14,7 +14,7 @@ RULE_MESSAGES = {
     4: "Na 'OPAanhef' kan 'OPAanhef', 'OPHoofdstukTitel', 'OPParagraafTitel' of 'OPArtikelTitel' volgen.",
     5: "Na 'OPHoofdstukTitel' kan 'OPParagraafTitel', 'OPArtikelTitel', 'OPLid', 'StandaardAlinea' of 'Lijstalinea' volgen.",
     6: "Na 'OPParagraafTitel' kan 'OPArtikelTitel' volgen.",
-    7: "Na 'OPArtikelTitel' kan 'OPLid', 'StandaardAlinea' of 'Lijstalinea' volgen.",
+    7: "Na 'OPArtikelTitel' kan 'OPLid' of 'StandaardAlinea' volgen.",
     8: "Na 'OPLid' kunnen 'OPLid', 'OPHoofdstukTitel', 'OPParagraafTitel', 'OPArtikelTitel', 'OPOndertekening', 'OPBijlageTitel' of 'OPNotaToelichtingTitel' volgen.",
     9: "Na 'StandaardAlinea' kunnen 'StandaardAlinea', 'Lijstalinea', 'OPHoofdstukTitel', 'OPParagraafTitel', 'OPArtikelTitel', 'OPOndertekening', 'OPBijlageTitel' of 'OPNotaToelichtingTitel' volgen.",
     10: "Na 'Lijstalinea' kunnen 'StandaardAlinea', 'Lijstalinea', 'OPHoofdstukTitel', 'OPParagraafTitel', 'OPArtikelTitel', 'OPOndertekening', 'OPBijlageTitel' of 'OPNotaToelichtingTitel' volgen.",
@@ -25,6 +25,7 @@ RULE_MESSAGES = {
     15: "Als 'OPNotaToelichtingTitel' is geweest, dan mag daarna niet meer voorkomen: 'OPAanhef', 'OPHoofdstukTitel', 'OPParagraafTitel', 'OPArtikelTitel', 'OPLid' of 'OPBijlageTitel' voorkomen.",
     16: "Het profiel 'OPNotaToelichtingTitel' mag maar één keer voorkomen.",
     17: "StandaardAlinea kan geen opsomming zijn.",
+    18: "OPLid moet genummerde opsomming zijn, mogelijk moet dit 'StandaardAlinea' zijn.",
 }
 
 TRANSITION_RULES: Dict[str, Dict[str, List[str]]] = {
@@ -34,7 +35,7 @@ TRANSITION_RULES: Dict[str, Dict[str, List[str]]] = {
         "rule": 5,
     },
     "OPParagraafTitel": {"allowed": ["OPArtikelTitel"], "rule": 6},
-    "OPArtikelTitel": {"allowed": ["OPLid", "StandaardAlinea", "Lijstalinea"], "rule": 7},
+    "OPArtikelTitel": {"allowed": ["OPLid", "StandaardAlinea"], "rule": 7},
     "OPLid": {
         "allowed": [
             "OPLid",
@@ -160,6 +161,20 @@ def check_structure(
             if number_val == 1:
                 _flag(df, idx, fout_col, regel_col, 17)
 
+        if profile == "OPLid":
+            number_val = _to_int(row.get(number_col, row.get("genummerd", 0)))
+            has_numid = bool(_to_int(row.get("numId")))
+            has_num_props = bool(row.get("num_properties"))
+            style = str(row.get("style_name", "")).strip()
+            style_norm = style.lower()
+            has_style = bool(style and style_norm not in {"normal", "standaard"})  # treat default styles als geen signaal
+            level_val = str(row.get("niveau", "")).strip()
+            if level_val.lower() in {"", "nan", "none"}:
+                level_val = None
+            leading = _has_leading_ops_signal(row)
+            if number_val == 0 and not has_numid and not has_num_props and not has_style and not level_val and not leading:
+                _flag(df, idx, fout_col, regel_col, 18)
+
         prev_profile = profile
 
     if export_csv_path:
@@ -180,3 +195,30 @@ def _to_int(value) -> int:
         return int(value)
     except (TypeError, ValueError):
         return 0
+
+
+def _has_leading_ops_signal(row: pd.Series) -> bool:
+    patterns = ("leading_text", "leading_run_text")
+    for column in patterns:
+        raw = str(row.get(column, "")).strip()
+        if not raw:
+            continue
+        if _looks_like_number(raw) or _looks_like_letter(raw):
+            return True
+    return False
+
+
+def _looks_like_number(text: str) -> bool:
+    normalized = text.rstrip(". )")
+    return normalized.isdigit()
+
+
+LOWER_ROMAN = {"i", "ii", "iii", "iv", "v", "vi", "vii", "viii", "ix", "x"}
+UPPER_ROMAN = {val.upper() for val in LOWER_ROMAN}
+
+
+def _looks_like_letter(text: str) -> bool:
+    normalized = text.rstrip(". )")
+    if len(normalized) == 1 and normalized.isalpha():
+        return True
+    return normalized.lower() in LOWER_ROMAN or normalized.upper() in UPPER_ROMAN
